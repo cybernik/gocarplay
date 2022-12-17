@@ -1,7 +1,7 @@
 package usblink
 
 import (
-	"context"
+	"bufio"
 	"github.com/google/gousb"
 	"log"
 	"time"
@@ -72,8 +72,9 @@ func (l *USBLink) loop() {
 }
 
 func (l *USBLink) outEndpointProcess(out *gousb.OutEndpoint) {
+
 	/*
-		stream, err := out.NewStream(512, 1)
+		stream, err := out.NewStream(512*9600, 1)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -97,41 +98,48 @@ func (l *USBLink) outEndpointProcess(out *gousb.OutEndpoint) {
 }
 
 func (l *USBLink) inEndpointProcess(in *gousb.InEndpoint) {
-	ctx := context.Background()
-	stream, err := in.NewStream(512*19200, 1)
+	//ctx := context.Background()
+
+	stream, err := in.NewStream(512*9600, 180)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer stream.Close()
 
+	br := bufio.NewReaderSize(stream, 512*9600)
+
 	incoming := make(chan incomingPacket, 10000)
 	go l.incoming(incoming)
 
-	timeAfter := 1 * time.Second
 	for {
 		select {
-		case <-time.After(timeAfter):
-			log.Println("no data 1 second")
 		case <-l.exitChan:
 			return
 		default:
-			received, err := l.receiveUsbMessage(stream, ctx)
-
-			select {
-			case incoming <- incomingPacket{
+			received, err := l.receiveVideoAudioUsbMessage(br)
+			incoming <- incomingPacket{
 				data: received,
 				err:  err,
-			}:
-			default:
-				log.Println("packet dropped!!!")
 			}
+
+			/*
+				select {
+				case incoming <- incomingPacket{
+					data: received,
+					err:  err,
+				}:
+				default:
+					log.Println("packet dropped!!!")
+				}
+
+			*/
 
 		}
 	}
 }
 
 type incomingPacket struct {
-	data *usbMessage
+	data usbMessage
 	err  error
 }
 
@@ -152,7 +160,7 @@ func (l *USBLink) incoming(in chan incomingPacket) {
 		case packet := <-in:
 			if packet.err != nil && l.onError != nil {
 				l.onError(packet.err)
-			} else if packet.data != nil && l.onData != nil {
+			} else if packet.data.buf != nil && l.onData != nil {
 				switch packet.data.header.Type {
 				case protocol.VideoDataPacketType:
 					video, err := protocol.UnmarhalVideoData(packet.data.buf)
@@ -169,20 +177,22 @@ func (l *USBLink) incoming(in chan incomingPacket) {
 						incomingAudio <- audio
 					}
 				default:
-					payload := protocol.GetPayloadByHeader(packet.data.header)
-					err := protocol.Unmarshal(packet.data.buf, payload)
-					if err != nil && l.onError != nil {
-						l.onError(err)
-					} else {
-						switch data := payload.(type) {
-						case *protocol.VideoData:
-							incomingVideo <- *data
-						case *protocol.AudioData:
-							incomingAudio <- *data
-						default:
-							incomingData <- data
+					/*
+						payload := protocol.GetPayloadByHeader(packet.data.header)
+						err := protocol.Unmarshal(packet.data.buf, payload)
+						if err != nil && l.onError != nil {
+							l.onError(err)
+						} else {
+							switch data := payload.(type) {
+							case *protocol.VideoData:
+								incomingVideo <- *data
+							case *protocol.AudioData:
+								incomingAudio <- *data
+							default:
+								incomingData <- data
+							}
 						}
-					}
+					*/
 				}
 			}
 		}
@@ -190,8 +200,11 @@ func (l *USBLink) incoming(in chan incomingPacket) {
 }
 
 func (l *USBLink) incomingVideo(in chan protocol.VideoData) {
+	//timeAfter := 1 * time.Second
 	for {
 		select {
+		//case <-time.After(timeAfter):
+		//	log.Println("no data 1 second")
 		case <-l.exitChan:
 			return
 		case packet := <-in:
@@ -227,27 +240,39 @@ type usbMessage struct {
 	buf    []byte
 }
 
-func (l *USBLink) receiveUsbMessage(readStream *gousb.ReadStream, ctx context.Context) (*usbMessage, error) {
+func (l *USBLink) receiveVideoAudioUsbMessage(reader *bufio.Reader) (usbMessage, error) {
+	for {
+		msg, err := l.receiveUsbMessage(reader)
+		if err != nil {
+			return msg, err
+		}
+		if msg.header.Type == protocol.VideoDataPacketType || msg.header.Type == protocol.AudioDataPacketType {
+			return msg, nil
+		}
+	}
+}
+
+func (l *USBLink) receiveUsbMessage(reader *bufio.Reader) (usbMessage, error) {
 	buf := make([]byte, 16)
 
-	num, err := readStream.ReadContext(ctx, buf)
+	num, err := reader.Read(buf)
 	if err != nil || num != len(buf) {
-		return nil, err
+		return usbMessage{}, err
 	}
 	hdr, err := protocol.UnmarshalHeader(buf[:num])
 	if err != nil {
-		return nil, err
+		return usbMessage{}, err
 	}
-	//payload := protocol.GetPayloadByHeader(hdr)
+
 	buf = make([]byte, hdr.Length)
 	if hdr.Length > 0 {
-		num, err = readStream.ReadContext(ctx, buf)
+		num, err = reader.Read(buf)
 		if err != nil || num != len(buf) {
-			return nil, err
+			return usbMessage{}, err
 		}
 	}
-	//err = protocol.Unmarshal(buf, payload)
-	return &usbMessage{header: hdr, buf: buf}, nil
+
+	return usbMessage{header: hdr, buf: buf}, nil
 }
 
 func (l *USBLink) sendUsbMessage(out *gousb.OutEndpoint, msg interface{}) error {
@@ -255,13 +280,21 @@ func (l *USBLink) sendUsbMessage(out *gousb.OutEndpoint, msg interface{}) error 
 	if err != nil {
 		return err
 	}
-	_, err = out.Write(buf[:16])
-	if err != nil {
-		return err
-	}
-	if len(buf) > 16 {
-		_, err = out.Write(buf[16:])
-	}
+	_, err = out.Write(buf)
+
+	/*
+		buf, err := protocol.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		_, err = out.Write(buf[:16])
+		if err != nil {
+			return err
+		}
+		if len(buf) > 16 {
+			_, err = out.Write(buf[16:])
+		}
+	*/
 	return err
 }
 
@@ -270,7 +303,7 @@ func (l *USBLink) usbConnect() (*gousb.Device, error) {
 	devs, err := l.usbCtx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
 		founded := desc.Vendor == vid && (desc.Product == pid || desc.Product == pid2)
 		if founded {
-			log.Printf("product found: %s", desc)
+			log.Printf("product found: %s", desc, desc.Speed)
 			for _, cfgDesc := range desc.Configs {
 				for _, intDesc := range cfgDesc.Interfaces {
 					for _, altSetting := range intDesc.AltSettings {
