@@ -8,8 +8,8 @@ import (
 	"log"
 	"net/http"
 	"time"
-	"webrtc/link"
 	"webrtc/protocol"
+	"webrtc/usblink"
 
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
@@ -30,7 +30,8 @@ var (
 	videoTrack       *webrtc.TrackLocalStaticSample
 	audioDataChannel *webrtc.DataChannel
 	size             deviceSize
-	fps              int32 = 25
+	fps              int32 = 30
+	usbLink          *usblink.USBLink
 )
 
 func setupWebRTC(offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
@@ -142,14 +143,13 @@ func webRTCOfferHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func sendTouch(data []byte) {
-	var touch deviceTouch
-	if err := json.Unmarshal(data, &touch); err != nil {
-		return
+	if usbLink != nil {
+		var touch deviceTouch
+		if err := json.Unmarshal(data, &touch); err != nil {
+			return
+		}
+		usbLink.SendMessage(&protocol.Touch{X: uint32(touch.X * 10000 / float32(size.Width)), Y: uint32(touch.Y * 10000 / float32(size.Height)), Action: protocol.TouchAction(touch.Action)})
 	}
-
-	fmt.Println("sendTouch", touch)
-
-	link.SendData(&protocol.Touch{X: uint32(touch.X * 10000 / float32(size.Width)), Y: uint32(touch.Y * 10000 / float32(size.Height)), Action: protocol.TouchAction(touch.Action)})
 }
 
 func startCarPlay(data []byte) {
@@ -157,19 +157,17 @@ func startCarPlay(data []byte) {
 		return
 	}
 
-	log.Println("try start carplay")
-	if err := link.Init(); err != nil {
-		return
-	}
-
-	go link.Communicate(func(data interface{}) {
-		switch data := data.(type) {
-		case *protocol.VideoData:
-			duration := time.Duration((float32(1) / float32(fps)) * float32(time.Second))
-			videoTrack.WriteSample(media.Sample{Data: data.Data, Duration: duration})
-		case *protocol.AudioData:
+	usbLink = new(usblink.USBLink)
+	usbLink.Start(func() {
+		log.Println("device ready to init", size.Width, size.Height)
+		initCarplay(size.Width, size.Height, fps, 160)
+	}, func(data protocol.VideoData) {
+		duration := time.Duration((float32(1) / float32(fps)) * float32(time.Second))
+		videoTrack.WriteSample(media.Sample{Data: data.Data, Duration: duration})
+	},
+		func(data protocol.AudioData) {
 			if len(data.Data) == 0 {
-				log.Printf("[onData] %#v", data)
+				//log.Printf("[onData] %#v", data)
 			} else {
 				var buf bytes.Buffer
 				fr := protocol.AudioDecodeTypes[data.DecodeType].Frequency
@@ -178,18 +176,32 @@ func startCarPlay(data []byte) {
 				binary.Write(&buf, binary.LittleEndian, ch)
 				audioDataChannel.Send(append(buf.Bytes(), data.Data...))
 			}
-		default:
-			log.Printf("[onData] %#v", data)
-		}
-	}, func(err error) {
-		log.Fatalf("[ERROR] %#v", err)
-	})
+		},
+		func(data interface{}) {
+			//log.Printf("[onData] %#v", data)
+		}, func(err error) {
+			log.Fatalf("[ERROR] %#v", err)
+		})
+}
 
-	go link.Start(size.Width, size.Height, fps, 160)
+func intToByte(data int32) []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, data)
+	return buf.Bytes()
+}
+
+func initCarplay(width, height, fps, dpi int32) {
+	usbLink.SendMessage(&protocol.SendFile{FileName: "/tmp/screen_dpi\x00", Content: intToByte(dpi)})
+	usbLink.SendMessage(&protocol.Open{Width: width, Height: height, VideoFrameRate: fps, Format: 5, PacketMax: 4915200, IBoxVersion: 2, PhoneWorkMode: 2})
+
+	usbLink.SendMessage(&protocol.ManufacturerInfo{A: 0, B: 0})
+	usbLink.SendMessage(&protocol.SendFile{FileName: "/tmp/night_mode\x00", Content: intToByte(1)})
+	usbLink.SendMessage(&protocol.SendFile{FileName: "/tmp/hand_drive_mode\x00", Content: intToByte(1)})
+	usbLink.SendMessage(&protocol.SendFile{FileName: "/tmp/charge_mode\x00", Content: intToByte(0)})
+	usbLink.SendMessage(&protocol.SendFile{FileName: "/tmp/box_name\x00", Content: bytes.NewBufferString("BoxName").Bytes()})
 }
 
 func main() {
-	fmt.Println("test")
 	log.Println("http://localhost:8001")
 	http.HandleFunc("/connect", webRTCOfferHandler)
 	http.Handle("/", http.FileServer(http.Dir("./")))

@@ -1,5 +1,7 @@
 package protocol
 
+import "fmt"
+
 type SendFile struct {
 	FileNameSize int32 `struc:"int32,little,sizeof=FileName"`
 	FileName     NullTermString
@@ -94,4 +96,8 @@ type BluetoothPairedList struct {
 type Unknown struct {
 	Type uint32 `struc:"skip"`
 	Data []byte `struc:"skip"`
+}
+
+func (u *Unknown) String() string {
+	return fmt.Sprintf("type: %d, data: %s", u.Type, string(u.Data))
 }
