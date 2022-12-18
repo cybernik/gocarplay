@@ -83,6 +83,8 @@ func (l *USBLink) outEndpointProcess(out *gousb.OutEndpoint) {
 
 	l.onReadySend()
 
+	buff := make([]byte, 0, 512*9600)
+
 	timeAfter := 2 * time.Second
 	for {
 		select {
@@ -90,7 +92,63 @@ func (l *USBLink) outEndpointProcess(out *gousb.OutEndpoint) {
 			//log.Println("herbeat")
 			l.sendUsbMessage(out, &protocol.Heartbeat{})
 		case msg := <-l.outData:
-			l.sendUsbMessage(out, msg)
+			start := time.Now()
+			remaining := cap(buff)
+			bMsg, err := protocol.Marshal(msg)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if remaining > len(bMsg) {
+				remaining -= len(bMsg)
+				buff = append(buff, bMsg...)
+			} else {
+				_, err = out.Write(bMsg)
+				if err != nil {
+					log.Fatal(err)
+				}
+				continue
+			}
+
+		loop:
+			for {
+				if time.Now().Sub(start) > 300*time.Millisecond {
+					_, err = out.Write(buff)
+					if err != nil {
+						log.Fatal(err)
+					}
+					break loop
+				}
+				select {
+				case msg = <-l.outData:
+					bMsg, err = protocol.Marshal(msg)
+					if err != nil {
+						log.Fatal(err)
+					}
+					if remaining > len(bMsg) {
+						remaining -= len(bMsg)
+						buff = append(buff, bMsg...)
+					} else {
+						_, err = out.Write(buff)
+						if err != nil {
+							log.Fatal(err)
+						}
+
+						_, err = out.Write(bMsg)
+						if err != nil {
+							log.Fatal(err)
+						}
+						break loop
+					}
+				default:
+					_, err = out.Write(buff)
+					if err != nil {
+						log.Fatal(err)
+					}
+					break loop
+				}
+			}
+
+			buff = buff[:0]
 		case <-l.exitChan:
 			return
 		}
@@ -108,19 +166,59 @@ func (l *USBLink) inEndpointProcess(in *gousb.InEndpoint) {
 
 	br := bufio.NewReaderSize(stream, 512*9600)
 
-	incoming := make(chan incomingPacket, 10000)
-	go l.incoming(incoming)
+	//incoming := make(chan incomingPacket, 10000)
+	//go l.incoming(incoming)
 
 	for {
 		select {
 		case <-l.exitChan:
 			return
 		default:
-			received, err := l.receiveVideoAudioUsbMessage(br)
-			incoming <- incomingPacket{
-				data: received,
-				err:  err,
+			packet, err := l.receiveVideoAudioUsbMessage(br)
+			if err != nil && l.onError != nil {
+				l.onError(err)
+			} else if packet.buf != nil && l.onData != nil {
+				switch packet.header.Type {
+				case protocol.VideoDataPacketType:
+					video, err := protocol.UnmarhalVideoData(packet.buf)
+					if err != nil && l.onError != nil {
+						l.onError(err)
+					} else {
+						l.onVideo(video)
+					}
+				case protocol.AudioDataPacketType:
+					audio, err := protocol.UnmarshalAudioData(packet.buf)
+					if err != nil && l.onError != nil {
+						l.onError(err)
+					} else {
+						l.onAudio(audio)
+					}
+				default:
+					/*
+						payload := protocol.GetPayloadByHeader(packet.data.header)
+						err := protocol.Unmarshal(packet.data.buf, payload)
+						if err != nil && l.onError != nil {
+							l.onError(err)
+						} else {
+							switch data := payload.(type) {
+							case *protocol.VideoData:
+								incomingVideo <- *data
+							case *protocol.AudioData:
+								incomingAudio <- *data
+							default:
+								incomingData <- data
+							}
+						}
+					*/
+				}
 			}
+
+			/*
+				incoming <- incomingPacket{
+					data: received,
+					err:  err,
+				}
+			*/
 
 			/*
 				select {
