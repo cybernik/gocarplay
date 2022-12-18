@@ -1,4 +1,5 @@
-!build/**/
+!build/win-x64/*.exe
+!build/win-x64/*.dll
 
 # Binaries for programs and plugins
 *.exe
