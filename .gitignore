@@ -1,12 +1,12 @@
-!build/win-x64/*.exe
-!build/win-x64/*.dll
-
 # Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+!build/win-x64/*.exe
+!build/win-x64/*.dll
 
 # Test binary, built with `go test -c`
 *.test
