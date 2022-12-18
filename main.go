@@ -67,10 +67,11 @@ func setupWebRTC(offer webrtc.SessionDescription) (*webrtc.SessionDescription, e
 
 	// Create a video track
 	videoCodec := webrtc.RTPCodecCapability{
-		MimeType:     webrtc.MimeTypeH264,
-		ClockRate:    90000,
-		Channels:     0,
-		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032",
+		MimeType:  webrtc.MimeTypeH264,
+		ClockRate: 90000,
+		Channels:  0,
+		//SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032",
+		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f",
 		RTCPFeedback: nil,
 	}
 	if videoTrack, err = webrtc.NewTrackLocalStaticSample(videoCodec, "video", "video"); err != nil {
@@ -157,15 +158,17 @@ func startCarPlay(data []byte) {
 		return
 	}
 
+	duration := time.Duration((float32(1) / float32(fps)) * float32(time.Second))
+
 	usbLink = new(usblink.USBLink)
 	usbLink.Start(func() {
 		log.Println("device ready to init", size.Width, size.Height)
 		initCarplay(size.Width, size.Height, fps, 160)
 	}, func(data protocol.VideoData) {
-		duration := time.Duration((float32(1) / float32(fps)) * float32(time.Second))
 		videoTrack.WriteSample(media.Sample{Data: data.Data, Duration: duration})
 	},
 		func(data protocol.AudioData) {
+			return
 			if len(data.Data) == 0 {
 				//log.Printf("[onData] %#v", data)
 			} else {
